@@ -1,0 +1,129 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Transcription Demo</title>
+</head>
+<body>
+    <h1>Live Transcription Demo</h1>
+    <button id="startBtn">Start Transcription</button>
+    <button id="stopBtn" disabled>Stop Transcription</button>
+    <p><strong>Transcription:</strong></p>
+    <div id="transcription"></div>
+
+    <script>
+        let websocket;
+        let mediaRecorder;
+        let audioContext;
+        let processor;
+        let input;
+        let globalStream;
+
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const transcriptionDiv = document.getElementById('transcription');
+
+        startBtn.onclick = startTranscription;
+        stopBtn.onclick = stopTranscription;
+
+        function startTranscription() {
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            transcriptionDiv.innerHTML = '';
+
+            // Initialize WebSocket
+            websocket = new WebSocket('wss://ubuntu-gpu:8765/');
+
+            websocket.onmessage = function(event) {
+                const message = event.data;
+                console.log('Received:', message);
+                transcriptionDiv.innerHTML += message + ' ';
+            };
+
+            websocket.onopen = function() {
+                console.log('WebSocket connection established');
+            };
+
+            websocket.onclose = function() {
+                console.log('WebSocket connection closed');
+            };
+
+            // Get user media
+            navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+                .then(function(stream) {
+                    audioContext = new AudioContext();
+                    globalStream = stream;
+                    input = audioContext.createMediaStreamSource(stream);
+
+                    processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                    input.connect(processor);
+                    processor.connect(audioContext.destination);
+
+                    processor.onaudioprocess = function(e) {
+                        const audioData = e.inputBuffer.getChannelData(0);
+                        // Convert to 16-bit PCM
+                        const pcmData = downsampleBuffer(audioData, 16000);
+                        if (websocket.readyState === WebSocket.OPEN) {
+                            websocket.send(pcmData);
+                        }
+                    };
+                })
+                .catch(function(err) {
+                    console.error('Error accessing microphone:', err);
+                });
+        }
+
+        function stopTranscription() {
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+
+            // Close WebSocket
+            if (websocket) {
+                websocket.close();
+            }
+
+            // Stop audio processing
+            if (processor && input) {
+                processor.disconnect();
+                input.disconnect();
+                processor = null;
+                input = null;
+            }
+
+            // Stop all audio tracks
+            if (globalStream) {
+                globalStream.getTracks().forEach(track => track.stop());
+            }
+
+            if (audioContext) {
+                audioContext.close();
+            }
+        }
+
+        function downsampleBuffer(buffer, sampleRate = 16000) {
+            if (sampleRate === audioContext.sampleRate) {
+                return buffer;
+            }
+            const sampleRateRatio = audioContext.sampleRate / sampleRate;
+            const newLength = Math.round(buffer.length / sampleRateRatio);
+            const result = new Int16Array(newLength);
+            let offsetResult = 0;
+            let offsetBuffer = 0;
+            while (offsetResult < result.length) {
+                const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+                let accum = 0, count = 0;
+                for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+                    accum += buffer[i];
+                    count++;
+                }
+                result[offsetResult] = Math.min(1, accum / count) * 0x7FFF;
+                offsetResult++;
+                offsetBuffer = nextOffsetBuffer;
+            }
+            return result.buffer;
+        }
+    </script>
+</body>
+</html>
+
